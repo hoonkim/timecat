@@ -1,0 +1,88 @@
+name: Update Homebrew tap
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish to the tap, for example v0.1.1
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  update-tap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${{ github.event.release.tag_name }}"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unsupported tag format: $tag" >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download source archive
+        shell: bash
+        run: |
+          tag="${{ steps.release.outputs.tag }}"
+          curl --fail --location --silent --show-error \
+            --output "timecat-$tag.tar.gz" \
+            "https://github.com/hoonkim/timecat/archive/refs/tags/$tag.tar.gz"
+          echo "SHA256=$(sha256sum "timecat-$tag.tar.gz" | awk '{print $1}')" >> "$GITHUB_ENV"
+
+      - name: Check out Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: hoonkim/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula
+        shell: bash
+        working-directory: homebrew-tap
+        run: |
+          tag="${{ steps.release.outputs.tag }}"
+          version="${{ steps.release.outputs.version }}"
+          formula="Formula/timecat.rb"
+
+          ruby -0777 -i -pe '
+            tag = ENV.fetch("TAG")
+            version = ENV.fetch("VERSION")
+            sha256 = ENV.fetch("SHA256")
+            gsub(%r{https://github\.com/hoonkim/timecat/archive/refs/tags/v[^"]+\.tar\.gz},
+                 "https://github.com/hoonkim/timecat/archive/refs/tags/#{tag}.tar.gz")
+            gsub(/sha256 "[0-9a-f]{64}"/, "sha256 \"#{sha256}\"")
+            gsub(/timecat \d+\.\d+\.\d+/, "timecat #{version}")
+          ' "$formula"
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+
+      - name: Commit and push formula
+        shell: bash
+        working-directory: homebrew-tap
+        run: |
+          if git diff --quiet -- Formula/timecat.rb; then
+            echo "Formula already up to date."
+            exit 0
+          fi
+
+          version="${{ steps.release.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/timecat.rb
+          git commit -m "Update timecat to v$version"
+          git push

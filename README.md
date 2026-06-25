@@ -25,3 +25,9 @@ brew install hoonkim/tap/timecat
 ```sh
 cargo build --release
 ```
+
+## Release
+
+Publishing a GitHub release automatically updates `hoonkim/homebrew-tap`.
+The workflow needs a repository secret named `HOMEBREW_TAP_TOKEN` with write
+access to the tap repository.
