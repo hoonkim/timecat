@@ -17,7 +17,7 @@ Press `q`, `Esc`, or `Ctrl-C` to quit.
 ## Install With Homebrew
 
 ```sh
-brew install hoonkim/timecat/timecat
+brew install hoonkim/tap/timecat
 ```
 
 ## Build
