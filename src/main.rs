@@ -15,6 +15,7 @@ use crossterm::{
     },
 };
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DIGIT_HEIGHT: usize = 7;
 const DIGIT_WIDTH: usize = 5;
 const DIGIT_GAP: usize = 1;
@@ -56,8 +57,36 @@ const DIGITS: [[&str; DIGIT_HEIGHT]; 10] = [
 const COLON: [&str; DIGIT_HEIGHT] = [" ", "#", "#", " ", "#", "#", " "];
 
 fn main() -> io::Result<()> {
+    if handle_cli_args() {
+        return Ok(());
+    }
+
     let mut terminal = TerminalSession::start()?;
     run(&mut terminal.stdout)
+}
+
+fn handle_cli_args() -> bool {
+    let Some(arg) = std::env::args().nth(1) else {
+        return false;
+    };
+
+    match arg.as_str() {
+        "-h" | "--help" => {
+            println!("timecat {VERSION}");
+            println!("A large 7-segment digital clock for modern terminals.");
+            println!();
+            println!("Usage: timecat");
+            println!();
+            println!("Controls:");
+            println!("  q, Esc, Ctrl-C    quit");
+            true
+        }
+        "-V" | "--version" => {
+            println!("timecat {VERSION}");
+            true
+        }
+        _ => false,
+    }
 }
 
 fn run(stdout: &mut io::Stdout) -> io::Result<()> {

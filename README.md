@@ -14,6 +14,12 @@ cargo run
 The clock opens in the terminal alternate screen and updates once per second.
 Press `q`, `Esc`, or `Ctrl-C` to quit.
 
+## Install With Homebrew
+
+```sh
+brew install hoonkim/timecat/timecat
+```
+
 ## Build
 
 ```sh
