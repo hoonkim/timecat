@@ -20,6 +20,7 @@ const DIGIT_HEIGHT: usize = 7;
 const DIGIT_WIDTH: usize = 5;
 const DIGIT_GAP: usize = 1;
 const MIN_MARGIN: usize = 1;
+const MAX_KITTY_TEXT_SCALE: usize = 7;
 
 const DIGITS: [[&str; DIGIT_HEIGHT]; 10] = [
     [
@@ -91,13 +92,16 @@ fn handle_cli_args() -> bool {
 
 fn run(stdout: &mut io::Stdout) -> io::Result<()> {
     let mut last_drawn = String::new();
+    let mut last_terminal_size = None;
 
     loop {
         let now = Local::now().format("%H:%M:%S").to_string();
+        let terminal_size = terminal::size()?;
 
-        if now != last_drawn {
+        if now != last_drawn || Some(terminal_size) != last_terminal_size {
             draw_clock(stdout, &now)?;
             last_drawn = now;
+            last_terminal_size = Some(terminal_size);
         }
 
         let tick_start = Instant::now();
@@ -128,7 +132,11 @@ fn draw_clock(stdout: &mut io::Stdout, time: &str) -> io::Result<()> {
     )?;
 
     if content_width > terminal_width as usize || content_height > terminal_height as usize {
-        draw_too_small(stdout, terminal_width, terminal_height)?;
+        if is_kitty_terminal() {
+            draw_kitty_compact_time(stdout, time, terminal_width, terminal_height)?;
+        } else {
+            draw_compact_time(stdout, time, terminal_width, terminal_height)?;
+        }
         stdout.flush()?;
         return Ok(());
     }
@@ -205,16 +213,18 @@ fn scale_rows(rows: Vec<String>, scale: usize) -> Vec<String> {
         .collect()
 }
 
-fn draw_too_small(
+fn draw_compact_time(
     stdout: &mut io::Stdout,
+    time: &str,
     terminal_width: u16,
     terminal_height: u16,
 ) -> io::Result<()> {
-    let message = format!(
-        "Terminal too small: current {}x{}",
-        terminal_width, terminal_height
-    );
-    let x = terminal_width.saturating_sub(message.len() as u16) / 2;
+    if terminal_width == 0 || terminal_height == 0 {
+        return Ok(());
+    }
+
+    let message: String = time.chars().take(terminal_width as usize).collect();
+    let x = terminal_width.saturating_sub(message.chars().count() as u16) / 2;
     let y = terminal_height / 2;
 
     queue!(
@@ -224,6 +234,45 @@ fn draw_too_small(
         Print(message),
         ResetColor
     )
+}
+
+fn draw_kitty_compact_time(
+    stdout: &mut io::Stdout,
+    time: &str,
+    terminal_width: u16,
+    terminal_height: u16,
+) -> io::Result<()> {
+    if terminal_width == 0 || terminal_height == 0 {
+        return Ok(());
+    }
+
+    let message = time;
+    let message_width = message.chars().count();
+    if message_width == 0 {
+        return Ok(());
+    }
+    if terminal_width as usize <= message_width {
+        return draw_compact_time(stdout, time, terminal_width, terminal_height);
+    }
+
+    let scale = ((terminal_width as usize / message_width).min(terminal_height as usize))
+        .clamp(1, MAX_KITTY_TEXT_SCALE);
+    let content_width = message_width * scale;
+    let x = terminal_width.saturating_sub(content_width as u16) / 2;
+    let y = terminal_height.saturating_sub(scale as u16) / 2;
+
+    queue!(
+        stdout,
+        MoveTo(x, y),
+        SetForegroundColor(Color::White),
+        Print(format!("\x1b]66;s={scale};{message}\x07")),
+        ResetColor
+    )
+}
+
+fn is_kitty_terminal() -> bool {
+    std::env::var_os("KITTY_WINDOW_ID").is_some()
+        || std::env::var("TERM").is_ok_and(|term| term.contains("xterm-kitty"))
 }
 
 fn should_quit(event: Event) -> bool {
