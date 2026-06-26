@@ -1,8 +1,10 @@
 [package]
 name = "timecat"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 
 [dependencies]
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 crossterm = "0.29"
+serde_json = "1"
+unicode-width = "0.2"
