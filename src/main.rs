@@ -11,8 +11,7 @@ use crossterm::{
     execute, queue,
     style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
     terminal::{
-        self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
-        enable_raw_mode,
+        self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     },
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -171,12 +170,9 @@ fn draw_clock(
         .unwrap_or(0);
     let content_height = lines.len();
 
-    queue!(
-        stdout,
-        SetBackgroundColor(alert.background_color()),
-        SetForegroundColor(alert.foreground_color()),
-        Clear(ClearType::All)
-    )?;
+    let background = alert.background_color();
+    let foreground = alert.foreground_color();
+    let mut frame = vec![Vec::new(); terminal_height as usize];
 
     let Some(layout) = clock_layout(
         content_width,
@@ -188,52 +184,141 @@ fn draw_clock(
         alert,
     ) else {
         if is_kitty_terminal() {
-            draw_kitty_compact_time(stdout, time, terminal_width, terminal_height)?;
+            add_kitty_compact_time_fragment(&mut frame, time, terminal_width, terminal_height);
         } else {
-            draw_compact_time(stdout, time, terminal_width, terminal_height)?;
+            add_compact_time_fragment(&mut frame, time, terminal_width, terminal_height);
         }
-        draw_schedule(
-            stdout,
+        add_schedule_fragments(
+            &mut frame,
             &schedule_lines,
             terminal_width,
             terminal_height,
             compact_schedule_y(schedule_lines.len(), terminal_height, alert),
             1,
-        )?;
-        stdout.flush()?;
-        return Ok(());
+        );
+        add_alert_message_fragment(&mut frame, alert, terminal_width, terminal_height);
+        return draw_frame(stdout, &frame, terminal_width, background, foreground);
     };
 
     for (row, line) in lines.iter().enumerate() {
-        queue!(
-            stdout,
-            MoveTo(layout.digit_x, layout.digit_y + row as u16),
-            Print(line)
-        )?;
+        add_fragment(
+            &mut frame,
+            layout.digit_y + row as u16,
+            layout.digit_x,
+            line.clone(),
+            line.chars().count(),
+            foreground,
+            None,
+        );
     }
 
-    draw_schedule(
-        stdout,
+    add_schedule_fragments(
+        &mut frame,
         &schedule_lines,
         terminal_width,
         terminal_height,
         layout.schedule_y,
         layout.schedule_text_scale,
-    )?;
-    draw_alert_message(stdout, alert, terminal_width, terminal_height)?;
+    );
+    add_alert_message_fragment(&mut frame, alert, terminal_width, terminal_height);
+    draw_frame(stdout, &frame, terminal_width, background, foreground)
+}
+
+#[derive(Clone)]
+struct TextFragment {
+    x: u16,
+    text: String,
+    cell_width: usize,
+    foreground: Color,
+    background: Option<Color>,
+}
+
+fn add_fragment(
+    frame: &mut [Vec<TextFragment>],
+    y: u16,
+    x: u16,
+    text: String,
+    cell_width: usize,
+    foreground: Color,
+    background: Option<Color>,
+) {
+    let Some(row) = frame.get_mut(y as usize) else {
+        return;
+    };
+    if cell_width == 0 {
+        return;
+    }
+
+    row.push(TextFragment {
+        x,
+        text,
+        cell_width,
+        foreground,
+        background,
+    });
+}
+
+fn draw_frame(
+    stdout: &mut io::Stdout,
+    frame: &[Vec<TextFragment>],
+    terminal_width: u16,
+    background: Color,
+    foreground: Color,
+) -> io::Result<()> {
+    let width = terminal_width as usize;
+
+    for (y, fragments) in frame.iter().enumerate() {
+        queue!(
+            stdout,
+            MoveTo(0, y as u16),
+            SetForegroundColor(foreground),
+            SetBackgroundColor(background)
+        )?;
+
+        let mut cursor = 0usize;
+        let mut fragments = fragments.clone();
+        fragments.sort_by_key(|fragment| fragment.x);
+
+        for fragment in fragments {
+            let x = fragment.x as usize;
+            if x >= width {
+                continue;
+            }
+            if x > cursor {
+                queue!(stdout, Print(" ".repeat(x - cursor)))?;
+                cursor = x;
+            }
+
+            queue!(
+                stdout,
+                SetForegroundColor(fragment.foreground),
+                SetBackgroundColor(fragment.background.unwrap_or(background)),
+                Print(fragment.text),
+                SetForegroundColor(foreground),
+                SetBackgroundColor(background)
+            )?;
+            cursor = cursor.saturating_add(fragment.cell_width).min(width);
+        }
+
+        if cursor < width {
+            queue!(stdout, Print(" ".repeat(width - cursor)))?;
+        }
+    }
+
+    queue!(stdout, ResetColor)?;
     stdout.flush()
 }
 
-fn draw_schedule(
-    stdout: &mut io::Stdout,
+fn add_schedule_fragments(
+    frame: &mut [Vec<TextFragment>],
     lines: &[String],
     terminal_width: u16,
     terminal_height: u16,
     start_y: u16,
     text_scale: usize,
-) -> io::Result<()> {
+) {
     if lines.is_empty() || terminal_width == 0 || terminal_height == 0 {
-        return Ok(());
+        return;
     }
 
     let text_scale = text_scale.max(1);
@@ -245,18 +330,18 @@ fn draw_schedule(
         let rendered_text = if is_kitty_terminal() && text_scale > 1 {
             format!("\x1b]66;s={text_scale};{text}\x07")
         } else {
-            text
+            text.clone()
         };
-        queue!(
-            stdout,
-            MoveTo(x, y),
-            SetForegroundColor(Color::Grey),
-            Print(rendered_text),
-            ResetColor
-        )?;
+        add_fragment(
+            frame,
+            y,
+            x,
+            rendered_text,
+            display_width(&text) * text_scale,
+            Color::Grey,
+            None,
+        );
     }
-
-    Ok(())
 }
 
 fn compact_schedule_y(line_count: usize, terminal_height: u16, alert: &AlertState) -> u16 {
@@ -264,31 +349,32 @@ fn compact_schedule_y(line_count: usize, terminal_height: u16, alert: &AlertStat
     terminal_height.saturating_sub(line_count as u16 + alert_reserved)
 }
 
-fn draw_alert_message(
-    stdout: &mut io::Stdout,
+fn add_alert_message_fragment(
+    frame: &mut [Vec<TextFragment>],
     alert: &AlertState,
     terminal_width: u16,
     terminal_height: u16,
-) -> io::Result<()> {
+) {
     let Some(message) = alert.message() else {
-        return Ok(());
+        return;
     };
     if terminal_width == 0 || terminal_height < 2 {
-        return Ok(());
+        return;
     }
 
     let text = truncate_to_width(&message, terminal_width as usize);
     let x = centered_x(&text, terminal_width);
     let y = terminal_height.saturating_sub(2);
 
-    queue!(
-        stdout,
-        MoveTo(x, y),
-        SetForegroundColor(Color::Black),
-        SetBackgroundColor(Color::Yellow),
-        Print(text),
-        ResetColor
-    )
+    add_fragment(
+        frame,
+        y,
+        x,
+        text.clone(),
+        display_width(&text),
+        Color::Black,
+        Some(Color::Yellow),
+    );
 }
 
 struct ClockLayout {
@@ -970,46 +1056,48 @@ fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
-fn draw_compact_time(
-    stdout: &mut io::Stdout,
+fn add_compact_time_fragment(
+    frame: &mut [Vec<TextFragment>],
     time: &str,
     terminal_width: u16,
     terminal_height: u16,
-) -> io::Result<()> {
+) {
     if terminal_width == 0 || terminal_height == 0 {
-        return Ok(());
+        return;
     }
 
     let message: String = time.chars().take(terminal_width as usize).collect();
     let x = centered_x(&message, terminal_width);
     let y = terminal_height / 2;
 
-    queue!(
-        stdout,
-        MoveTo(x, y),
-        SetForegroundColor(Color::White),
-        Print(message),
-        ResetColor
-    )
+    add_fragment(
+        frame,
+        y,
+        x,
+        message.clone(),
+        display_width(&message),
+        Color::White,
+        None,
+    );
 }
 
-fn draw_kitty_compact_time(
-    stdout: &mut io::Stdout,
+fn add_kitty_compact_time_fragment(
+    frame: &mut [Vec<TextFragment>],
     time: &str,
     terminal_width: u16,
     terminal_height: u16,
-) -> io::Result<()> {
+) {
     if terminal_width == 0 || terminal_height == 0 {
-        return Ok(());
+        return;
     }
 
     let message = time;
     let message_width = message.chars().count();
     if message_width == 0 {
-        return Ok(());
+        return;
     }
     if terminal_width as usize <= message_width {
-        return draw_compact_time(stdout, time, terminal_width, terminal_height);
+        return add_compact_time_fragment(frame, time, terminal_width, terminal_height);
     }
 
     let scale = ((terminal_width as usize / message_width).min(terminal_height as usize))
@@ -1018,13 +1106,15 @@ fn draw_kitty_compact_time(
     let x = terminal_width.saturating_sub(content_width as u16) / 2;
     let y = terminal_height.saturating_sub(scale as u16) / 2;
 
-    queue!(
-        stdout,
-        MoveTo(x, y),
-        SetForegroundColor(Color::White),
-        Print(format!("\x1b]66;s={scale};{message}\x07")),
-        ResetColor
-    )
+    add_fragment(
+        frame,
+        y,
+        x,
+        format!("\x1b]66;s={scale};{message}\x07"),
+        content_width,
+        Color::White,
+        None,
+    );
 }
 
 fn is_kitty_terminal() -> bool {
